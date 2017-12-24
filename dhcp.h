@@ -1,8 +1,4 @@
 /* dhcp.h */
-#include <sys/types.h>
-#include <sys/socket.h>
-#include <netinet/in.h>
-#include <arpa/inet.h>
 
 #ifndef DHCP_H
 #define DHCP_H
@@ -25,9 +21,9 @@ typedef struct dhcp_packet {
     struct in_addr yiaddr;   /* 16: Client IP address */
     struct in_addr siaddr;   /* 18: IP address of next server to talk to */
     struct in_addr giaddr;   /* 20: DHCP relay agent IP address */
-    unsigned char chaddr[DHCP_HADDR_LEN];   /* 24: Client hardware address */
-    char sname[DHCP_SNAME_LEN];             /* 40: Server name */
-    char file[DHCP_FILE_LEN];               /* 104: Boot filename */
+    u_int8_t chaddr[DHCP_HADDR_LEN];   /* 24: Client hardware address */
+    u_int8_t sname[DHCP_SNAME_LEN];             /* 40: Server name */
+    u_int8_t file[DHCP_FILE_LEN];               /* 104: Boot filename */
     u_int32_t magic_cookie;                 /* 212: Magic Cookie */
     unsigned char options[DHCP_MAX_OPTION_LEN];  /* 216: Optional parameters (actual length dependent on MTU). */
 } packet;
@@ -36,6 +32,7 @@ typedef struct dhcp_packet {
 #define DHO_SUBNET_MASK                  1
 #define DHO_ROUTERS                      3
 #define DHO_DOMAIN_NAME_SERVERS          6
+#define DHO_REQUESTED_IP                 50 
 #define DHO_DHCP_LEASE_TIME              51
 #define DHO_DHCP_MESSAGE_TYPE            53
 #define DHO_DHCP_SERVER_IDENTIFIER       54
@@ -58,6 +55,15 @@ typedef struct dhcp_packet {
 /* BOOTP (rfc951) message types */
 #define	BOOTREQUEST	1
 #define BOOTREPLY	2
+
+/* Basic */
+#define DHCP_CLIENT_PORT 68
+#define DHCP_SERVER_PORT 67
+#define DHCP_MAGIC_COOKIE 0x63538263
+#define DEV "eth1"
+
+#define IP_FILE "dhcp.config"
+#define LEASE_FILE "dhcp.lease"
 
 #endif /* DHCP_H */
 

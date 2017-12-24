@@ -1,569 +1,731 @@
-#include <stdio.h>
-#include <string.h>
-#include <stdlib.h>
-#include <stdint.h>
-#include <sys/errno.h>
-#include <time.h>
-#include <ctype.h>
-#include <regex.h>
-#include <unistd.h>
-
-#include <sys/types.h>
-#include <sys/socket.h>
-#include <netinet/in.h>
 #include <arpa/inet.h>
-#include <netdb.h>
-
+#include <net/if.h>     // for struct ifreq
+#include <sys/types.h>
+#include <sys/socket.h> // for setsockopt()
 #include <sys/ioctl.h>
-#include <net/if_arp.h>
-#include <net/if.h>
-
-#include "dhcpserver.h"
-#include "bindings.h"
-#include "args.h"
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <unistd.h>
+#include <time.h>
 #include "dhcp.h"
-#include "options.h"
-#include "logging.h"
 
-/*
- * Global pool
- */
-
-address_pool pool;
-
-/*
- * Helper functions
- */
-
-char *
-str_ip (uint32_t ip)
+void print_timestamp()
 {
-    struct in_addr addr;
-    memcpy(&addr, &ip, sizeof(ip));
-    return inet_ntoa(addr);
+    time_t timep;
+    struct tm *p;
+    time(&timep);
+    p = localtime(&timep); 
+    printf("[%d-%d-%d %d:%d:%d] ", (1900+p->tm_year),(1+p->tm_mon), p->tm_mday, p->tm_hour, p->tm_min, p->tm_sec);   
 }
 
-char *
-str_mac (uint8_t *mac)
+char *get_timestamp()
 {
-    static char str[128];
+    static char timestr[40];
+    time_t t;
+    struct tm *nowtime;
 
-    sprintf(str, "%.2x:%.2x:%.2x:%.2x:%.2x:%.2x",
-	    mac[0], mac[1], mac[2],
-	    mac[3], mac[4], mac[5]);
+    time(&t);
+    nowtime = localtime(&t);
+    strftime(timestr,sizeof(timestr),"[%Y-%m-%d %H:%M:%S] ",nowtime);
 
-    return str;
+    return timestr;
 }
 
-char *
-str_status (int status)
+
+void string_trim(char *str)
 {
-    switch(status) {
-    case EMPTY:
-	return "empty";
-    case PENDING:
-	return "pending";
-    case ASSOCIATED:
-	return "associated";
-    case RELEASED:
-	return "released";
-    case EXPIRED:
-	return "expired";
-    default:
-	return NULL;
+    int len = strlen(str);
+    if(str[len-1] == '\n')
+    {
+        len--;
+        str[len] = 0;   
     }
 }
 
-/*
- * Network related routines
- */
-
-void
-add_arp_entry (int s, uint8_t *mac, uint32_t ip)
+void change_status(int line_num)
 {
-    struct arpreq ar;
-    struct sockaddr_in *sock;
+    FILE *fp;  
+    char line[32];
+    char txt[10][20];
+    int read_count = 0;
+    int write_count = 0;
 
-    memset(&ar, 0, sizeof(ar));
+    if((fp = fopen(IP_FILE, "r")) == NULL)
+    {
+        printf("Error in file open. \n");
+        exit(-1);
+    }  
+    while((fgets(line,1024,fp) != NULL))
+    {
+        strcpy(txt[read_count],line);
+        read_count++;
+    }
+    fclose(fp);
 
-    /* add a proxy ARP entry for given pair */
-    
-    sock = (struct sockaddr_in *) &ar.arp_pa;
-    sock->sin_family = AF_INET;
-    sock->sin_addr.s_addr = ip;
+    txt[line_num-1][0] = '0';
 
-    memcpy(ar.arp_ha.sa_data, mac, 6);
-    ar.arp_flags = ATF_COM; //(ATF_PUBL | ATF_COM);
+    if((fp = fopen(IP_FILE, "w")) == NULL)
+    {
+        printf("Error in file open. \n");
+        exit(-1);
+    }  
 
-    strncpy(ar.arp_dev, pool.device, sizeof(ar.arp_dev));
-    
-    if (ioctl(s, SIOCSARP, (char *) &ar) < 0)  {
-	perror("error adding entry to arp table");
-    };    
+    while(write_count < read_count)
+    {
+        fputs(txt[write_count], fp);
+        write_count++;
+    }   
+    fclose(fp);
 }
 
-void
-delete_arp_entry (int s, uint8_t *mac, uint32_t ip)
+void change_status_one()
 {
-    struct arpreq ar;
-    struct sockaddr_in *sock;
+    FILE *fp;  
+    char line[32];
+    char txt[10][20];
+    int read_count = 0;
+    int write_count = 0;
 
-    memset(&ar, 0, sizeof(ar));
-    
-    sock = (struct sockaddr_in *) &ar.arp_pa;
-    sock->sin_family = AF_INET;
-    sock->sin_addr.s_addr = ip;
-
-    strncpy(ar.arp_dev, pool.device, sizeof(ar.arp_dev));
-
-    if(ioctl(s, SIOCGARP, (char *) &ar) < 0)  {
-	if (errno != ENXIO) {
-	    perror("error getting arp entry");
-	    return;
-	}
-    };
-    
-    if(ip == 0 || memcmp(mac, ar.arp_ha.sa_data, 6) == 0) { 
-	if(ioctl(s, SIOCDARP, (char *) &ar) < 0) {
-	    perror("error removing arp table entry");
-	}
+    if((fp = fopen(IP_FILE, "r")) == NULL)
+    {
+        printf("Error in file open. \n");
+        exit(-1);
+    }  
+    while((fgets(line,1024,fp) != NULL))
+    {
+        strcpy(txt[read_count],line);
+        read_count++;
     }
+    fclose(fp);
+
+    txt[0][0] = '1';
+
+    if((fp = fopen(IP_FILE, "w")) == NULL)
+    {
+        printf("Error in file open. \n");
+        exit(-1);
+    }  
+
+    while(write_count < read_count)
+    {
+        fputs(txt[write_count], fp);
+        write_count++;
+    }   
+    fclose(fp);
 }
 
-int
-send_dhcp_reply	(int s, struct sockaddr_in *client_sock, dhcp_msg *reply)
+
+void get_valid_ip(char *ip)
 {
-    size_t len, ret;
-
-    len = serialize_option_list(&reply->opts, reply->hdr.options,
-				sizeof(reply->hdr) - DHCP_HEADER_SIZE);
-
-    len += DHCP_HEADER_SIZE;
-    
-    client_sock->sin_addr.s_addr = reply->hdr.yiaddr; // use the address assigned by us
-
-    if(reply->hdr.yiaddr != 0) {
-	add_arp_entry(s, reply->hdr.chaddr, reply->hdr.yiaddr);
+    FILE *fp;  
+    char line[32];
+    int line_count = 0;
+    if((fp = fopen(IP_FILE, "r")) == NULL)
+    {
+        printf("Error in file open. \n");
+        exit(-1);
+    }  
+    while((fgets(line,1024,fp) != NULL))
+    {
+        line_count++;
+        if(line[0] == '1')
+            break;
     }
-
-    if ((ret = sendto(s, reply, len, 0, (struct sockaddr *)client_sock, sizeof(*client_sock))) < 0) {
-	perror("sendto failed");
-	return -1;
-    }
-
-    return ret;
+    fclose(fp);
+    strcpy(ip,&line[2]);
+    string_trim(ip);
+    change_status(line_count);
 }
 
-/*
- * Message handling routines.
- */
-
-uint8_t
-expand_request (dhcp_msg *request, size_t len)
+void get_final_ip(char *ip)
 {
-    init_option_list(&request->opts);
-    
-    if (request->hdr.hlen < 1 || request->hdr.hlen > 16)
-	return 0;
+    FILE *fp;  
+    char line[32];
 
-    if(parse_options_to_list(&request->opts, (dhcp_option *)request->hdr.options,
-			     len - DHCP_HEADER_SIZE) == 0)
-	return 0;
-    
-    dhcp_option *type_opt = search_option(&request->opts, DHCP_MESSAGE_TYPE);
-    
-    if (type_opt == NULL)
-	return 0;
-
-    uint8_t type = type_opt->data[0];
-    
-    return type;
+    if((fp = fopen(IP_FILE, "r")) == NULL)
+    {
+        printf("Error in file open. \n");
+        exit(-1);
+    }  
+    while((fgets(line,1024,fp) != NULL))
+    {
+        ;
+    }
+    fclose(fp);
+    strncpy(ip,&line[2], strlen(&line[2]));
+    string_trim(ip);
 }
 
-int
-init_reply (dhcp_msg *request, dhcp_msg *reply)
+
+void add_lease(char *ip, char *mac)
 {
-    memset(&reply->hdr, 0, sizeof(reply->hdr));
-
-    init_option_list(&reply->opts);
-    
-    reply->hdr.op = BOOTREPLY;
-
-    reply->hdr.htype = request->hdr.htype;
-    reply->hdr.hlen  = request->hdr.hlen;
-
-    reply->hdr.xid   = request->hdr.xid;
-    reply->hdr.flags = request->hdr.flags;
-     
-    reply->hdr.giaddr = request->hdr.giaddr;
-    
-    memcpy(reply->hdr.chaddr, request->hdr.chaddr, request->hdr.hlen);
-
-    return 1;
+    FILE *fp;  
+    char *time;
+    if((fp = fopen(LEASE_FILE, "a+")) == NULL)
+    {
+        printf("Error in file open. \n");
+        exit(-1);
+    }  
+    time = get_timestamp();
+    fwrite(time,strlen(time), 1, fp);
+    fwrite("  ",2, 1, fp);
+    fwrite(ip,strlen(ip), 1, fp);
+    fwrite("  ",2, 1, fp);
+    fwrite(mac,strlen(mac), 1, fp);
+    fwrite("\n",1, 1, fp);
+    fclose(fp);
 }
 
-void
-fill_requested_dhcp_options (dhcp_option *requested_opts, dhcp_option_list *reply_opts)
+void remove_lease()
 {
-    uint8_t len = requested_opts->len;
-    uint8_t *id = requested_opts->data;
+    FILE *fp;  
+    // char line[1024];
+    // char txt[10][1024];
+    // int read_count = 0;
+    // int write_count = 0;
 
-    int i;
-    for (i = 0; i < len; i++) {
-	    
-	if(id[i] != 0) {
-	    dhcp_option *opt = search_option(&pool.options, id[i]);
+    if((fp = fopen(LEASE_FILE, "w")) == NULL)
+    {
+        printf("Error in file open. \n");
+        exit(-1);
+    }  
 
-	    if(opt != NULL)
-		append_option(reply_opts, opt);
-	}
-	    
-    }
+    // while(write_count < read_count-1)
+    // {
+    //     fputs(txt[write_count], fp);
+    //     write_count++;
+    // }   
+    fclose(fp);    
 }
 
-int
-fill_dhcp_reply (dhcp_msg *request, dhcp_msg *reply,
-		 address_binding *binding, uint8_t type)
+int get_mac_address(unsigned char *mac)
 {
-    static dhcp_option type_opt, server_id_opt;
+    struct ifreq s;
+    int fd;
+    int flag;
+    //unsigned char arp[6];
 
-    type_opt.id = DHCP_MESSAGE_TYPE;
-    type_opt.len = 1;
-    type_opt.data[0] = type;
-    append_option(&reply->opts, &type_opt);
-
-    server_id_opt.id = SERVER_IDENTIFIER;
-    server_id_opt.len = 4;
-    memcpy(server_id_opt.data, &pool.server_id, sizeof(pool.server_id));
-    append_option(&reply->opts, &server_id_opt);
-    
-    if(binding != NULL) {
-	reply->hdr.yiaddr = binding->address;
+    if ((fd = socket(PF_INET, SOCK_DGRAM, IPPROTO_UDP)) < 0)
+    {
+        printf("Socket Error");  
+        exit(1); 
     }
-    
-    if (type != DHCP_NAK) {
-	dhcp_option *requested_opts = search_option(&request->opts, PARAMETER_REQUEST_LIST);
+    strcpy(s.ifr_name, DEV);
+    flag = ioctl(fd, SIOCGIFHWADDR, &s);
+    close(fd);
 
-	if (requested_opts)
-	    fill_requested_dhcp_options(requested_opts, &reply->opts);
-    }
-    
-    return type;
-}
+    if (flag != 0)
+        return -1;
 
-int
-serve_dhcp_discover (dhcp_msg *request, dhcp_msg *reply)
-{  
-    address_binding *binding = search_binding(&pool.bindings, request->hdr.chaddr,
-					      request->hdr.hlen, STATIC, EMPTY);
-
-    if (binding) { // a static binding has been configured for this client
-
-        log_info("Offer %s to %s (static), %s status %sexpired",
-                 str_ip(binding->address), str_mac(request->hdr.chaddr),
-                 str_status(binding->status),
-                 binding->binding_time + binding->lease_time < time(NULL) ? "" : "not ");
-            
-        if (binding->binding_time + binding->lease_time < time(NULL)) {
-	    binding->status = PENDING;
-	    binding->binding_time = time(NULL);
-	    binding->lease_time = pool.pending_time;
-	}
-            
-        return fill_dhcp_reply(request, reply, binding, DHCP_OFFER);
-
-    }
-
-    else { // use dynamic pool
-
-        /* If an address is available, the new address
-           SHOULD be chosen as follows: */
-
-	binding = search_binding(&pool.bindings, request->hdr.chaddr,
-				 request->hdr.hlen, DYNAMIC, EMPTY);
-
-        if (binding) {
-
-            /* The client's current address as recorded in the client's current
-               binding, ELSE */
-
-            /* The client's previous address as recorded in the client's (now
-               expired or released) binding, if that address is in the server's
-               pool of available addresses and not already allocated, ELSE */
-
-	    log_info("Offer %s to %s, %s status %sexpired",
-		     str_ip(binding->address), str_mac(request->hdr.chaddr),
-		     str_status(binding->status),
-		     binding->binding_time + binding->lease_time < time(NULL) ? "" : "not ");
-
-	    if (binding->binding_time + binding->lease_time < time(NULL)) {
-		binding->status = PENDING;
-		binding->binding_time = time(NULL);
-		binding->lease_time = pool.pending_time;
-	    }
-	    
-            return fill_dhcp_reply(request, reply, binding, DHCP_OFFER);
-
-        } else {
-
-	    /* The address requested in the 'Requested IP Address' option, if that
-	       address is valid and not already allocated, ELSE */
-
-	    /* A new address allocated from the server's pool of available
-	       addresses; the address is selected based on the subnet from which
-	       the message was received (if 'giaddr' is 0) or on the address of
-	       the relay agent that forwarded the message ('giaddr' when not 0). */
-
-	    // TODO: extract requested IP address
-	    uint32_t address = 0;
-	    dhcp_option *address_opt =
-		search_option(&request->opts, REQUESTED_IP_ADDRESS);
-
-	    if(address_opt != NULL)
-		memcpy(&address, address_opt->data, sizeof(address));
-	    
-	    binding = new_dynamic_binding(&pool.bindings, &pool.indexes, address,
-					  request->hdr.chaddr, request->hdr.hlen);
-
-	    if (binding == NULL) {
-		log_info("Can not offer an address to %s, no address available.",
-			 str_mac(request->hdr.chaddr));
-		
-		return 0;
-	    }
-
-	    log_info("Offer %s to %s, %s status %sexpired",
-		     str_ip(binding->address), str_mac(request->hdr.chaddr),
-		     str_status(binding->status),
-		     binding->binding_time + binding->lease_time < time(NULL) ? "" : "not ");
-	    
-	    if (binding->binding_time + binding->lease_time < time(NULL)) {
-		binding->status = PENDING;
-		binding->binding_time = time(NULL);
-		binding->lease_time = pool.pending_time;
-	    }
-
-	    return fill_dhcp_reply(request, reply, binding, DHCP_OFFER);
-	}
-
-    }
-
-    // should NOT reach here...
-}
-
-int
-serve_dhcp_request (dhcp_msg *request, dhcp_msg *reply)
-{
-    address_binding *binding = search_binding(&pool.bindings, request->hdr.chaddr,
-					      request->hdr.hlen, STATIC_OR_DYNAMIC, PENDING);
-
-    uint32_t server_id = 0;
-    dhcp_option *server_id_opt = search_option(&request->opts, SERVER_IDENTIFIER);
-
-    if(server_id_opt != NULL)
-	memcpy(&server_id, server_id_opt->data, sizeof(server_id));
-    
-    if (server_id == pool.server_id) { // this request is an answer to our offer
-
-	if (binding != NULL) {
-
-	    log_info("Ack %s to %s, associated",
-		     str_ip(binding->address), str_mac(request->hdr.chaddr));
-
-	    binding->status = ASSOCIATED;
-	    binding->lease_time = pool.lease_time;
-	    
-	    return fill_dhcp_reply(request, reply, binding, DHCP_ACK);
-	
-	} else {
-
-	    log_info("Nak to %s, not associated",
-		     str_mac(request->hdr.chaddr));
-		    
-	    return fill_dhcp_reply(request, reply, NULL, DHCP_NAK);
-	}
-
-    } else if (server_id != 0) { // answer to the offer of another server
-
-	log_info("Clearing %s of %s, accepted another server offer",
-		 str_ip(binding->address), str_mac(request->hdr.chaddr));
-		    
-	binding->status = EMPTY;
-	binding->lease_time = 0;
-	
-	return 0;
-
-    }
-
-    // malformed request...
+    memcpy((void *)mac, s.ifr_hwaddr.sa_data, 6);
     return 0;
 }
 
-int
-serve_dhcp_decline (dhcp_msg *request, dhcp_msg *reply)
+int get_ip_address(in_addr_t *ip)
 {
-    address_binding *binding = search_binding(&pool.bindings, request->hdr.chaddr,
-					      request->hdr.hlen, STATIC_OR_DYNAMIC, PENDING);
+    struct ifreq s;
+    int fd;
+    int flag;
+    //unsigned char arp[6];
 
-    if(binding != NULL) {
-	log_info("Declined %s by %s",
-		 str_ip(binding->address), str_mac(request->hdr.chaddr));
-
-	binding->status = EMPTY;
+    if ((fd = socket(PF_INET, SOCK_DGRAM, IPPROTO_UDP)) < 0)
+    {
+        printf("Socket Error");  
+        exit(1); 
     }
+    strcpy(s.ifr_name, DEV);
+    flag = ioctl(fd, SIOCGIFADDR, &s);
+    close(fd);
 
+    if (flag != 0)
+        return -1;
+
+    memcpy((void *)ip, s.ifr_addr.sa_data, 6);
     return 0;
 }
 
-int
-serve_dhcp_release (dhcp_msg *request, dhcp_msg *reply)
+u_int8_t get_packet_type(packet received)
 {
-    address_binding *binding = search_binding(&pool.bindings, request->hdr.chaddr,
-					      request->hdr.hlen, STATIC_OR_DYNAMIC, ASSOCIATED);
+    return received.options[2];
+}
 
-    if(binding != NULL) {
-	log_info("Released %s by %s",
-		 str_mac(request->hdr.chaddr), str_ip(binding->address));
+int fill_dhcp_option(unsigned char *options, u_int8_t type, u_int8_t *data, u_int8_t length)
+{
+    options[0] = type;
+    options[1] = length;
+    memcpy(&options[2], data, length);
+    // printf("length = %d \n",length);
+    // printf("type = %d \n",type);
+    return length + (sizeof(u_int8_t) * 2);
+}
 
-	binding->status = RELEASED;
+void fill_server_commen_field(packet *p)
+{
+    p->op = BOOTREPLY;
+    p->htype = 1;
+    p->hlen  = 6;
+    /* student ID  2014213092 */
+    p->xid   = 0x780E73E4;   
+    p->magic_cookie = DHCP_MAGIC_COOKIE;
+}
+
+void fill_offer(packet *offer_packet, packet *discover_packet, u_int32_t lease_time, char *ip)
+{
+    int len = 0;
+
+    u_int8_t message_data[] = {DHCPOFFER};
+    
+    in_addr_t submask_data = inet_addr("255.255.255.0");
+    in_addr_t router_data  = inet_addr("192.168.0.1");
+    in_addr_t domain_server_data = inet_addr("192.168.0.1");
+    in_addr_t server_data  = inet_addr("192.168.0.1");
+    
+    u_int32_t time_data;
+    u_int8_t end_data[] = {0};
+
+    time_data = htonl(lease_time);
+    memset(offer_packet, 0, sizeof(packet));
+    fill_server_commen_field(offer_packet);
+
+    offer_packet->xid    = discover_packet->xid;
+    offer_packet->flags  = discover_packet->flags;
+    memcpy((void *)offer_packet->chaddr, discover_packet->chaddr, 6);
+    
+    offer_packet->yiaddr.s_addr = inet_addr(ip);
+
+    len += fill_dhcp_option(&offer_packet->options[len], DHO_DHCP_MESSAGE_TYPE, (u_int8_t *)&message_data, sizeof(message_data));
+    len += fill_dhcp_option(&offer_packet->options[len], DHO_SUBNET_MASK, (u_int8_t *)&submask_data, sizeof(submask_data));
+    len += fill_dhcp_option(&offer_packet->options[len], DHO_ROUTERS, (u_int8_t *)&router_data, sizeof(router_data));
+    len += fill_dhcp_option(&offer_packet->options[len], DHO_DOMAIN_NAME_SERVERS, (u_int8_t *)&domain_server_data, sizeof(domain_server_data));
+    len += fill_dhcp_option(&offer_packet->options[len], DHO_DHCP_SERVER_IDENTIFIER, (u_int8_t *)&server_data, sizeof(server_data));
+    len += fill_dhcp_option(&offer_packet->options[len], DHO_DHCP_LEASE_TIME, (u_int8_t *)&time_data, sizeof(time_data));
+
+    len += fill_dhcp_option(&offer_packet->options[len], DHO_END, (u_int8_t *)&end_data, sizeof(end_data));
+}
+
+void fill_broadcast_ack(packet *ack_packet, packet *received_packet, u_int32_t lease_time, char *ip)
+{
+    int len = 0;
+    u_int32_t time_data;
+    u_int32_t renewal_time_data;
+    u_int32_t rebind_time_data;
+    u_int32_t student = 0x780E73E4;
+    u_int8_t message_data[] = {DHCPACK};
+    u_int8_t end_data[] = {0};
+
+    in_addr_t submask_data = inet_addr("255.255.255.0");
+    in_addr_t router_data  = inet_addr("192.168.0.1");
+    in_addr_t domain_server_data = inet_addr("192.168.0.1");
+    in_addr_t server_data  = inet_addr("192.168.0.1");
+
+    time_data = htonl(lease_time);
+    renewal_time_data = time_data / 2;
+    rebind_time_data  = (u_int32_t)(time_data * 7 / 8);
+
+    memset(ack_packet, 0, sizeof(packet));
+    fill_server_commen_field(ack_packet);
+
+    ack_packet->xid    = received_packet->xid;
+    ack_packet->flags  = received_packet->flags;
+    memcpy((void *)ack_packet->chaddr, received_packet->chaddr, 6);
+    
+    ack_packet->yiaddr.s_addr = inet_addr(ip);
+
+    len += fill_dhcp_option(&ack_packet->options[len], DHO_DHCP_MESSAGE_TYPE, (u_int8_t *)&message_data, sizeof(message_data));
+    len += fill_dhcp_option(&ack_packet->options[len], DHO_SUBNET_MASK, (u_int8_t *)&submask_data, sizeof(submask_data));
+    len += fill_dhcp_option(&ack_packet->options[len], DHO_ROUTERS, (u_int8_t *)&router_data, sizeof(router_data));
+    len += fill_dhcp_option(&ack_packet->options[len], DHO_DOMAIN_NAME_SERVERS, (u_int8_t *)&domain_server_data, sizeof(domain_server_data));
+    len += fill_dhcp_option(&ack_packet->options[len], DHO_DHCP_SERVER_IDENTIFIER, (u_int8_t *)&server_data, sizeof(server_data));
+    len += fill_dhcp_option(&ack_packet->options[len], DHO_DHCP_LEASE_TIME, (u_int8_t *)&time_data, sizeof(time_data));
+    len += fill_dhcp_option(&ack_packet->options[len], DHO_DHCP_RENEWAL_TIME, (u_int8_t *)&renewal_time_data, sizeof(renewal_time_data));
+    len += fill_dhcp_option(&ack_packet->options[len], DHO_DHCP_REBINDING_TIME, (u_int8_t *)&rebind_time_data, sizeof(rebind_time_data));
+    len += fill_dhcp_option(&ack_packet->options[len], DHO_VENDOR_CLASS_IDENTIFIER, (u_int8_t *)&student, sizeof(student));
+    len += fill_dhcp_option(&ack_packet->options[len], DHO_END, (u_int8_t *)&end_data, sizeof(end_data));
+}
+
+void fill_unicast_ack(packet *ack_packet, packet *received_packet, u_int32_t lease_time, char *ip)
+{
+    int len = 0;
+    u_int32_t time_data;
+    u_int8_t message_data[] = {DHCPACK};
+    u_int8_t end_data[] = {0};
+
+    in_addr_t submask_data = inet_addr("255.255.255.0");
+    in_addr_t router_data  = inet_addr("192.168.0.1");
+    in_addr_t domain_server_data = inet_addr("192.168.0.1");
+    in_addr_t server_data  = inet_addr("192.168.0.1");
+
+    time_data = htonl(lease_time);
+    memset(ack_packet, 0, sizeof(packet));
+    fill_server_commen_field(ack_packet);
+
+    ack_packet->xid    = received_packet->xid;
+    ack_packet->flags  = 0x0000;
+    memcpy((void *)ack_packet->chaddr, received_packet->chaddr, 6);
+    
+    ack_packet->yiaddr.s_addr = inet_addr(ip);
+
+    len += fill_dhcp_option(&ack_packet->options[len], DHO_DHCP_MESSAGE_TYPE, (u_int8_t *)&message_data, sizeof(message_data));
+    len += fill_dhcp_option(&ack_packet->options[len], DHO_SUBNET_MASK, (u_int8_t *)&submask_data, sizeof(submask_data));
+    len += fill_dhcp_option(&ack_packet->options[len], DHO_ROUTERS, (u_int8_t *)&router_data, sizeof(router_data));
+    len += fill_dhcp_option(&ack_packet->options[len], DHO_DOMAIN_NAME_SERVERS, (u_int8_t *)&domain_server_data, sizeof(domain_server_data));
+    len += fill_dhcp_option(&ack_packet->options[len], DHO_DHCP_SERVER_IDENTIFIER, (u_int8_t *)&server_data, sizeof(server_data));
+    len += fill_dhcp_option(&ack_packet->options[len], DHO_DHCP_LEASE_TIME, (u_int8_t *)&time_data, sizeof(time_data));
+    len += fill_dhcp_option(&ack_packet->options[len], DHO_END, (u_int8_t *)&end_data, sizeof(end_data));
+}
+
+void fill_nak(packet *ack_packet, packet *received_packet)
+{
+    int len = 0;
+    u_int32_t time_data;
+    u_int8_t message_data[] = {DHCPNAK};
+    u_int8_t end_data[] = {0};
+
+    in_addr_t server_data  = inet_addr("192.168.0.1");
+
+    memset(ack_packet, 0, sizeof(packet));
+    fill_server_commen_field(ack_packet);
+
+    ack_packet->xid    = received_packet->xid;
+    ack_packet->flags  = received_packet->flags;
+    memcpy((void *)ack_packet->chaddr, received_packet->chaddr, 6);
+    
+    len += fill_dhcp_option(&ack_packet->options[len], DHO_DHCP_MESSAGE_TYPE, (u_int8_t *)&message_data, sizeof(message_data));
+    len += fill_dhcp_option(&ack_packet->options[len], DHO_DHCP_SERVER_IDENTIFIER, (u_int8_t *)&server_data, sizeof(server_data));
+    len += fill_dhcp_option(&ack_packet->options[len], DHO_END, (u_int8_t *)&end_data, sizeof(end_data));
+}
+
+int determine_request_ip(packet *p)
+{   
+    char final_ip[32] = {0};
+    char *ip;
+
+    int final_n = 0;
+    int n = 0;
+
+    get_final_ip((char *) final_ip);
+    ip = inet_ntoa(*((struct in_addr *)&p->options[5]));
+
+    final_n = strlen(final_ip);
+    n = strlen(ip);
+
+    // printf("final_ip is %s\n", final_ip);
+    // printf("ip is %s\n", ip);
+    // printf("final_ip is %c\n", final_ip[final_n-2]);
+    // printf("ip is %c\n", ip[n-1]);
+
+    // printf("final : %d", atoi(final_ip[final_n-2]));
+    // printf("your  : %d", atoi(((char *)(*((u_int16_t *)&ip[n-2]))));
+    // printf("your  : %d", atoi((char *)((u_int16_t *)&ip[n-2])));
+    if ((u_int32_t)p->ciaddr.s_addr == 0)
+    {
+        return 1;
     }
-
-    return 0;
-}
-
-int
-serve_dhcp_inform (dhcp_msg *request, dhcp_msg *reply)
-{
-    log_info("Info to %s", str_mac(request->hdr.chaddr));
-	
-    return fill_dhcp_reply(request, reply, NULL, DHCP_ACK);
-}
-
-/*
- * Dispatch client DHCP messages to the correct handling routines
- */
-
-void
-message_dispatcher (int s, struct sockaddr_in server_sock)
-{
-     
-    while (1) {
-	struct sockaddr_in client_sock;
-	socklen_t slen = sizeof(client_sock);
-	size_t len;
-
-	dhcp_msg request;
-	dhcp_msg reply;
-
-	uint8_t type;
-
-	if((len = recvfrom(s, &request.hdr, sizeof(request.hdr), 0, (struct sockaddr *)&client_sock, &slen)) < DHCP_HEADER_SIZE + 5) {
-	    continue; // TODO: check the magic number 300
-	}
-
-	if(request.hdr.op != BOOTREQUEST)
-	    continue;
-	
-	if((type = expand_request(&request, len)) == 0) {
-	    log_error("%s.%u: invalid request received\n",
-		      inet_ntoa(client_sock.sin_addr), ntohs(client_sock.sin_port));
-	    continue;
-	}
-
-	init_reply(&request, &reply);
-
-	switch (type) {
-
-	case DHCP_DISCOVER:
-            type = serve_dhcp_discover(&request, &reply);
-	    break;
-
-	case DHCP_REQUEST:
-	    type = serve_dhcp_request(&request, &reply);
-	    break;
-	    
-	case DHCP_DECLINE:
-	    type = serve_dhcp_decline(&request, &reply);
-	    break;
-	    
-	case DHCP_RELEASE:
-	    type = serve_dhcp_release(&request, &reply);
-	    break;
-	    
-	case DHCP_INFORM:
-	    type = serve_dhcp_inform(&request, &reply);
-	    break;
-	    
-	default:
-	    printf("%s.%u: request with invalid DHCP message type option\n",
-		   inet_ntoa(client_sock.sin_addr), ntohs(client_sock.sin_port));
-	    break;
-	
-	}
-
-	if(type != 0)
-	    send_dhcp_reply(s, &client_sock, &reply);
-
-	delete_option_list(&request.opts);
-	delete_option_list(&reply.opts);
-
+    else
+    {   
+        if (ip[n-2] == '.')
+        {
+            if ( final_ip[final_n-2] >= ip[n-1])
+            {
+                return 0;
+            }            
+        }
     }
+    return -1;
+}   
 
+void send_to(int socket, const void* buffer, int buffer_length, int flags, const struct sockaddr* dest_addr, socklen_t dest_len)
+{
+    int res;
+    if ((res = sendto(socket, buffer, buffer_length, 0, dest_addr, dest_len)) < 0) {
+        printf("sendto failed. \n");
+        exit(1);
+    }
+    print_timestamp();
+    printf("Sending packet to: %s(%d)\n",inet_ntoa(((struct sockaddr_in*)dest_addr)->sin_addr),ntohs(((struct sockaddr_in*)dest_addr)->sin_port));
 }
 
-int
-main (int argc, char *argv[])
+void recv_from(int socket, void* buffer, int buffer_length, int flags, struct sockaddr* address, socklen_t* address_len)
 {
-    int s;
-    struct protoent *pp;
-    struct servent *ss;
-    struct sockaddr_in server_sock;
+    int res;
+    if ((res = recvfrom(socket, buffer, buffer_length, flags, address, address_len)) < 0) {
+        printf("recvfrom failed. \n");
+        exit(1);
+    }
+    print_timestamp();
+    printf("Recieve packet from: %s(%d)\n", inet_ntoa(((struct sockaddr_in*)address)->sin_addr), ntohs(((struct sockaddr_in*)address)->sin_port));
+}
 
-    /* Initialize global pool */
+int main(int argc, char **argv) 
+{
+    int broadcast_sock; /* Socket descriptor */
+    int unicast_sock;
+    char *timestamp;
+    struct ifreq netcard;
+    struct sockaddr_in clntAddr;
+    struct sockaddr_in servAddr;
+    struct sockaddr_in uni_clntAddr;
+    struct sockaddr_in uni_servAddr;
 
-    memset(&pool, 0, sizeof(pool));
+    struct sockaddr_in fromAddr;
+    struct in_addr received_addr;
+    packet send_packet, receive_packet;
 
-    init_binding_list(&pool.bindings);
-    init_option_list(&pool.options);
+    int res;
+    int clntPort; /* client port */
+    int servPort; /* server port */
+    int i = 1;
+    int lease_time;
+    u_int8_t type;
 
-    /* Load configuration */
+    unsigned int fromSize;
+    char ip[32] = {0};
+    char *final_ip;
 
-    parse_args(argc, argv, &pool);
-
-    /* Set up server */
-
-    if ((ss = getservbyname("bootps", "udp")) == 0) {
-        fprintf(stderr, "server: getservbyname() error\n");
+    if ((argc < 1) || (argc > 3)) /* Test for correct number of arguments */
+    {
+        printf("Usage: %s [lease_time]\n", argv[0]);
         exit(1);
     }
 
-     if ((pp = getprotobyname("udp")) == 0) {
-          fprintf(stderr, "server: getprotobyname() error\n");
-          exit(1);
-     }
+    if (argc == 2)
+    {
+        lease_time = atoi(argv[1]);
+    }
+    else
+    {
+        /* Default 30s */
+        lease_time = 30;
+    }
 
-     if ((s = socket(AF_INET, SOCK_DGRAM, pp->p_proto)) == -1) {
-          perror("server: socket() error");
-          exit(1);
-     }
+    clntPort = DHCP_CLIENT_PORT;
+    servPort = DHCP_SERVER_PORT;
 
-     server_sock.sin_family = AF_INET;
-     server_sock.sin_addr.s_addr = htonl(INADDR_ANY);
-     server_sock.sin_port = ss->s_port;
+    /* Create a datagram/UDP socket */
+    if ((broadcast_sock = socket(PF_INET, SOCK_DGRAM, 0)) < 0)
+    {
+        printf("socket() failed.\n");
+        exit(1);
+    }
 
-     if (bind(s, (struct sockaddr *) &server_sock, sizeof(server_sock)) == -1) {
-         perror("server: bind()");
-         close(s);
-         exit(1);
-     }
+    strcpy(netcard.ifr_name, DEV);
+    socklen_t len = sizeof(i);
+    /* Allow socket to broadcast */
+    setsockopt(broadcast_sock, SOL_SOCKET, SO_BROADCAST, &i, len);
 
-     printf("dhcp server: listening on %d\n", ntohs(server_sock.sin_port));
+    /* Set socket to interface DEV */
+    if(setsockopt(broadcast_sock, SOL_SOCKET, SO_BINDTODEVICE, (char *)&netcard, sizeof(netcard)) < 0)
+    {
+        printf("bind socket to %s error\n", DEV);
+    }
 
-     /* Message processing loop */
-     
-     message_dispatcher(s, server_sock);
+    /* Zero out structure */
+    memset(&clntAddr, 0, sizeof(clntAddr));
+    clntAddr.sin_family = AF_INET;
+    clntAddr.sin_port   = htons(clntPort);
+    clntAddr.sin_addr.s_addr = inet_addr("255.255.255.255");
 
-     close(s);
+    /* Construct the server address structure */
+    /*Zero out structure*/
+    memset(&servAddr, 0, sizeof(servAddr));
+    /* Internet addr family */
+    servAddr.sin_family = AF_INET; 
+    /*Server IP address*/
+    servAddr.sin_addr.s_addr = htonl(INADDR_ANY);
+    /* Server port */
+    servAddr.sin_port = htons(servPort);
 
-     return 0;
+    if((bind(broadcast_sock, (struct sockaddr *)&servAddr, sizeof(servAddr))) < 0)
+    {
+        printf("bind() failed.\n");
+        exit(1);
+    }
+
+    print_timestamp();printf("Waiting for packet.\n");
+
+    while(1)
+    {   
+
+        fromSize = sizeof(fromAddr);
+        /* Block until receive message from a client */
+        recv_from(broadcast_sock, &receive_packet, sizeof(packet), 0, (struct sockaddr *)&fromAddr, &fromSize);
+        print_timestamp();
+        printf("Handling client %s\n",inet_ntoa(fromAddr.sin_addr));
+        type = get_packet_type(receive_packet);
+
+        if(type == DHCPDISCOVER)
+        {
+            get_valid_ip(ip);
+            fill_offer(&send_packet, &receive_packet, (u_int32_t)lease_time, (char *)ip);
+            send_to(broadcast_sock, &send_packet, sizeof(packet), 0, (struct sockaddr *)&clntAddr, sizeof(clntAddr));
+            //recv_from(broadcast_sock, &receive_packet, sizeof(packet), 0, (struct sockaddr *)&fromAddr, &fromSize);
+        }
+        if(type == DHCPREQUEST)
+        {   
+            res = determine_request_ip(&receive_packet);
+            // printf("%d  ip is %s\n", res, inet_ntoa(*((struct in_addr *)&receive_packet.options[5])));
+
+            if ( res == 1)
+            {
+                fill_broadcast_ack(&send_packet, &receive_packet, (u_int32_t)lease_time, (char *)ip);
+                send_to(broadcast_sock, &send_packet, sizeof(packet), 0, (struct sockaddr *)&clntAddr, sizeof(clntAddr));
+                add_lease(ip,"08:00:27:d3:fd:ae");
+            }
+            else if (res == 0)
+            {
+                close(broadcast_sock);
+                /* Create a datagram/UDP socket */
+                if ((unicast_sock = socket(PF_INET, SOCK_DGRAM, 0)) < 0)
+                {
+                    printf("socket() failed.\n");
+                    exit(1);
+                }
+
+
+                memset(&uni_clntAddr, 0, sizeof(uni_clntAddr));
+                uni_clntAddr.sin_family = AF_INET;
+                uni_clntAddr.sin_port   = htons(clntPort);
+                uni_clntAddr.sin_addr.s_addr   = inet_addr(ip);
+
+                memset(&uni_servAddr, 0, sizeof(uni_servAddr));
+                uni_servAddr.sin_family = AF_INET; 
+                uni_servAddr.sin_addr.s_addr = inet_addr("192.168.0.1");
+                uni_servAddr.sin_port = htons(servPort);
+
+                if((bind(unicast_sock, (struct sockaddr *)&uni_servAddr, sizeof(uni_servAddr))) < 0)
+                {
+                    printf("bind() failed.\n");
+                    exit(1);
+                }
+
+                fill_unicast_ack(&send_packet, &receive_packet, (u_int32_t)lease_time, (char *)ip);
+                // send_to(broadcast_sock, &send_packet, sizeof(packet), 0, (struct sockaddr *)&clntAddr, sizeof(clntAddr));
+                send_to(unicast_sock, &send_packet, sizeof(packet), 0, (struct sockaddr *)&uni_clntAddr, sizeof(uni_clntAddr));
+                add_lease(ip,"08:00:27:d3:fd:ae");
+
+                close(unicast_sock);
+                /* Create a datagram/UDP socket */
+                if ((broadcast_sock = socket(PF_INET, SOCK_DGRAM, 0)) < 0)
+                {
+                    printf("socket() failed.\n");
+                    exit(1);
+                }
+
+                strcpy(netcard.ifr_name, DEV);
+                socklen_t len = sizeof(i);
+                /* Allow socket to broadcast */
+                setsockopt(broadcast_sock, SOL_SOCKET, SO_BROADCAST, &i, len);
+
+                /* Set socket to interface DEV */
+                if(setsockopt(broadcast_sock, SOL_SOCKET, SO_BINDTODEVICE, (char *)&netcard, sizeof(netcard)) < 0)
+                {
+                    printf("bind socket to %s error\n", DEV);
+                }
+
+                /* Zero out structure */
+                memset(&clntAddr, 0, sizeof(clntAddr));
+                clntAddr.sin_family = AF_INET;
+                clntAddr.sin_port   = htons(clntPort);
+                clntAddr.sin_addr.s_addr = inet_addr("255.255.255.255");
+
+                /* Construct the server address structure */
+                /*Zero out structure*/
+                memset(&servAddr, 0, sizeof(servAddr));
+                /* Internet addr family */
+                servAddr.sin_family = AF_INET; 
+                /*Server IP address*/
+                servAddr.sin_addr.s_addr = htonl(INADDR_ANY);
+                /* Server port */
+                servAddr.sin_port = htons(servPort);
+
+                if((bind(broadcast_sock, (struct sockaddr *)&servAddr, sizeof(servAddr))) < 0)
+                {
+                    printf("bind() failed.\n");
+                    exit(1);
+                }
+            }
+            else
+            {
+                close(broadcast_sock);
+                /* Create a datagram/UDP socket */
+                if ((unicast_sock = socket(PF_INET, SOCK_DGRAM, 0)) < 0)
+                {
+                    printf("socket() failed.\n");
+                    exit(1);
+                }
+
+                memset(&uni_clntAddr, 0, sizeof(uni_clntAddr));
+                uni_clntAddr.sin_family = AF_INET;
+                uni_clntAddr.sin_port   = htons(clntPort);
+                uni_clntAddr.sin_addr.s_addr   = inet_addr(ip);
+
+                memset(&uni_servAddr, 0, sizeof(uni_servAddr));
+                uni_servAddr.sin_family = AF_INET; 
+                uni_servAddr.sin_addr.s_addr = inet_addr("192.168.0.1");
+                uni_servAddr.sin_port = htons(servPort);
+
+                if((bind(unicast_sock, (struct sockaddr *)&uni_servAddr, sizeof(uni_servAddr))) < 0)
+                {
+                    printf("bind() failed.\n");
+                    exit(1);
+                }              
+                
+                fill_nak(&send_packet, &receive_packet);
+                send_to(unicast_sock, &send_packet, sizeof(packet), 0, (struct sockaddr *)&uni_clntAddr, sizeof(uni_clntAddr));
+
+                close(unicast_sock);
+                /* Create a datagram/UDP socket */
+                if ((broadcast_sock = socket(PF_INET, SOCK_DGRAM, 0)) < 0)
+                {
+                    printf("socket() failed.\n");
+                    exit(1);
+                }
+
+                strcpy(netcard.ifr_name, DEV);
+                socklen_t len = sizeof(i);
+                /* Allow socket to broadcast */
+                setsockopt(broadcast_sock, SOL_SOCKET, SO_BROADCAST, &i, len);
+
+                /* Set socket to interface DEV */
+                if(setsockopt(broadcast_sock, SOL_SOCKET, SO_BINDTODEVICE, (char *)&netcard, sizeof(netcard)) < 0)
+                {
+                    printf("bind socket to %s error\n", DEV);
+                }
+
+                /* Zero out structure */
+                memset(&clntAddr, 0, sizeof(clntAddr));
+                clntAddr.sin_family = AF_INET;
+                clntAddr.sin_port   = htons(clntPort);
+                clntAddr.sin_addr.s_addr = inet_addr("255.255.255.255");
+
+                /* Construct the server address structure */
+                /*Zero out structure*/
+                memset(&servAddr, 0, sizeof(servAddr));
+                /* Internet addr family */
+                servAddr.sin_family = AF_INET; 
+                /*Server IP address*/
+                servAddr.sin_addr.s_addr = htonl(INADDR_ANY);
+                /* Server port */
+                servAddr.sin_port = htons(servPort);
+
+                if((bind(broadcast_sock, (struct sockaddr *)&servAddr, sizeof(servAddr))) < 0)
+                {
+                    printf("bind() failed.\n");
+                    exit(1);
+                }
+            }
+        }
+        else if(type == DHCPRELEASE)
+        {
+            change_status_one();
+            remove_lease();
+        }
+        else if(type == DHCPINFORM)
+        {
+            fill_broadcast_ack(&send_packet, &receive_packet, (u_int32_t)lease_time, (char *)ip);
+            send_to(broadcast_sock, &send_packet, sizeof(packet), 0, (struct sockaddr *)&clntAddr, sizeof(clntAddr));
+        }
+        printf("Waiting for packet.\n");
+    }
 }
